@@ -436,7 +436,7 @@ async fn run() -> anyhow::Result<()> {
         .await
         .with_context(|| "Unable to find compatible WebGPU device")?;
 
-    let surf_config = wgpu::SurfaceConfiguration {
+    let mut surf_config = wgpu::SurfaceConfiguration {
         width: window.inner_size().width,
         height: window.inner_size().height,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -480,6 +480,9 @@ async fn run() -> anyhow::Result<()> {
                 WindowEvent::Resized(size) => {
                     renderer.resize(&device, size.width, size.height);
                     uniforms.resize(size.width, size.height);
+                    surf_config.width = size.width;
+                    surf_config.height = size.height;
+                    surface.configure(&device, &surf_config);
                 }
                 _ => (),
             },
