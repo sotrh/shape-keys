@@ -29,3 +29,5 @@ fn vs_main(v: Vertex, morphs: Morphs) -> VsData {
     return VsData(frag_pos, eye_norm, normal * 0.5 + 0.5);
 }
 ```
+
+Video demo: https://youtu.be/N6JcAi1hxOI
