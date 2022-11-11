@@ -1,0 +1,16 @@
+[package]
+name = "shape-keys"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1"
+bytemuck = {version = "1", features = ["derive"]}
+glam = {version = "0.22", features = ["bytemuck"]}
+gltf = "1"
+instant = "0.1"
+pollster = "0.2"
+wgpu = "0.14"
+winit = "0.27"
