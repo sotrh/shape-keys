@@ -31,3 +31,4 @@ fn vs_main(v: Vertex, morphs: Morphs) -> VsData {
 ```
 
 Video demo: https://youtu.be/N6JcAi1hxOI
+Patreon: https://www.patreon.com/sotrh
