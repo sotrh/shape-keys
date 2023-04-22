@@ -16,10 +16,29 @@ struct Morphs {
     d_normal1: vec3<f32>,
 }
 
+struct Instance {
+    @location(6)
+    weights: vec4<f32>,
+    @location(7)
+    normal_mat0: vec3<f32>,
+    @location(8)
+    normal_mat1: vec3<f32>,
+    @location(9)
+    normal_mat2: vec3<f32>,
+    @location(10)
+    model_mat0: vec4<f32>,
+    @location(11)
+    model_mat1: vec4<f32>,
+    @location(12)
+    model_mat2: vec4<f32>,
+    @location(13)
+    model_mat3: vec4<f32>,
+}
+
 struct Uniforms {
     weights: vec4<f32>,
-    normal_mat: mat4x4<f32>,
-    mvp: mat4x4<f32>,
+    view: mat4x4<f32>,
+    view_proj: mat4x4<f32>,
 }
 
 struct VsData {
@@ -36,7 +55,7 @@ struct VsData {
 var<uniform> uniforms: Uniforms;
 
 @vertex
-fn vs_main(v: Vertex, morphs: Morphs) -> VsData {
+fn vs_main(v: Vertex, morphs: Morphs, instance: Instance) -> VsData {
     var normal = v.normal;
     var position = v.position;
 
@@ -46,11 +65,25 @@ fn vs_main(v: Vertex, morphs: Morphs) -> VsData {
 
     position += morphs.d_position0 * uniforms.weights.x;
     position += morphs.d_position1 * uniforms.weights.y;
-    
-    let frag_pos = uniforms.mvp * vec4(position, 1.0);
-    let eye_norm = (uniforms.normal_mat * vec4(normal, 0.0)).xyz;
 
-    return VsData(frag_pos, eye_norm, normal * 0.5 + 0.5);
+    let normal_mat = mat3x3<f32>(
+        instance.normal_mat0,
+        instance.normal_mat1,
+        instance.normal_mat2,
+    );
+
+    let model_mat = mat4x4<f32>(
+        instance.model_mat0,
+        instance.model_mat1,
+        instance.model_mat2,
+        instance.model_mat3,
+    );
+    
+    // let frag_pos = uniforms.view_proj * vec4(position, 1.0);
+    let frag_pos = uniforms.view_proj * model_mat * vec4(position, 1.0);
+    let eye_norm = (uniforms.view * vec4(normal_mat * normal, 0.0)).xyz;
+
+    return VsData(frag_pos, eye_norm, instance.normal_mat0 * 0.5 + 0.5);
 }
 
 @fragment
@@ -61,7 +94,7 @@ fn fs_main(vd: VsData) -> @location(0) vec4<f32> {
     let n = normalize(vd.normal);
     let diffuse = clamp(dot(l, n), 0.0, 1.0);
 
-    // return vec4(vd.color * clamp(dot(l, n), 0.0, 1.0) + ambient, 1.0);
-    // return vec4(n * 0.5 + 0.5, 1.0);
-    return vec4(vec3(diffuse) + ambient, 1.0);
+    let col = vd.color * diffuse + ambient;
+
+    return vec4(col, 1.0);
 }

@@ -2,7 +2,8 @@ use std::{f32::consts::PI, num::NonZeroU64};
 
 use anyhow::{bail, Context};
 use bytemuck::{bytes_of, cast_slice};
-use wgpu::util::DeviceExt;
+use rand::Rng;
+use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use winit::{
     event::{ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent},
     event_loop::EventLoop,
@@ -25,12 +26,115 @@ struct Morphs {
     d1_normal: glam::Vec3,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct Instance {
+    weights: glam::Vec4,
+    position: glam::Vec3,
+    rotation: glam::Quat,
+    scale: f32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct InstanceRaw {
+    weights: glam::Vec4,
+    normal_mat0: glam::Vec4,
+    normal_mat1: glam::Vec4,
+    normal_mat2: glam::Vec4,
+    model_mat: glam::Mat4,
+}
+
+pub struct InstanceHandler {
+    data: Vec<Instance>,
+    buffer: wgpu::Buffer,
+}
+
+impl InstanceHandler {
+    pub fn new(
+        device: &wgpu::Device,
+        num: usize,
+        min_size: f32,
+        max_size: f32,
+        placement_radius: f32,
+    ) -> Self {
+        let random_direction = || {
+            let theta: f32 = rand::random::<f32>() * std::f32::consts::TAU;
+            let azimuth: f32 = rand::random::<f32>() * std::f32::consts::TAU;
+
+            let (stheta, ctheta) = theta.sin_cos();
+            let (sazi, cazi) = azimuth.sin_cos();
+
+            glam::vec3(ctheta * cazi, sazi, stheta * cazi)
+        };
+        let data = (0..num)
+            .map(|_| {
+                let dir = random_direction().normalize();
+                let position = dir * placement_radius * rand::random::<f32>();
+
+                let mut rng = rand::thread_rng();
+                let scale = rng.gen_range(min_size..=max_size);
+
+                let rotation =
+                    glam::Quat::from_axis_angle(dir, rand::random::<f32>() * std::f32::consts::TAU);
+
+                let weights = glam::vec4(
+                    rand::random(),
+                    rand::random(),
+                    rand::random(),
+                    rand::random(),
+                );
+
+                Instance {
+                    weights,
+                    position,
+                    rotation,
+                    scale,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let raw_data = data
+            .iter()
+            .map(|instance| {
+                let rotation = glam::Mat4::from_quat(instance.rotation);
+                let model_mat = glam::Mat4::from_scale_rotation_translation(
+                    glam::Vec3::splat(instance.scale),
+                    instance.rotation,
+                    instance.position,
+                );
+
+                let x_axis = rotation.x_axis;
+                let y_axis = rotation.y_axis;
+                let z_axis = rotation.z_axis;
+
+                InstanceRaw {
+                    weights: instance.weights,
+                    normal_mat0: x_axis,
+                    normal_mat1: y_axis,
+                    normal_mat2: z_axis,
+                    model_mat,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let buffer = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("InstanceHandler::buffer"),
+            contents: cast_slice(&raw_data),
+            usage: wgpu::BufferUsages::VERTEX
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::STORAGE,
+        });
+
+        Self { data, buffer }
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
     weights: glam::Vec4,
-    normal_mat: glam::Mat4,
-    mvp: glam::Mat4,
+    view: glam::Mat4,
+    view_proj: glam::Mat4,
 }
 
 struct UniformHandler {
@@ -59,12 +163,12 @@ impl UniformHandler {
     ) -> Self {
         let proj = glam::Mat4::perspective_lh(fovy, aspect_ratio, 0.1, 100.0);
         let view = glam::Mat4::look_at_lh(eye, look_at, glam::Vec3::Y);
-        let mvp = proj * view;
+        let view_proj = proj * view;
 
         let data = Uniforms {
             weights: glam::vec4(0.0, 0.0, 0.0, 0.0),
-            normal_mat: view,
-            mvp,
+            view,
+            view_proj,
         };
         let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Uniforms"),
@@ -123,8 +227,8 @@ impl UniformHandler {
         self.angle += self.rotation_speed * dt.as_secs_f32();
         let c = (self.angle * 2.0).cos() * 0.5 + 0.5;
         self.set_weights(c, 1.0 - c);
-        self.data.normal_mat = self.view * glam::Mat4::from_rotation_y(self.angle);
-        self.data.mvp = self.proj * self.data.normal_mat;
+        self.data.view = self.view * glam::Mat4::from_rotation_y(self.angle);
+        self.data.view_proj = self.proj * self.data.view;
         queue.write_buffer(&self.buffer, 0, bytes_of(&self.data));
     }
 }
@@ -190,6 +294,23 @@ impl Renderer {
                             5 => Float32x3,
                         ],
                     },
+                    wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<InstanceRaw>() as _,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &wgpu::vertex_attr_array![
+                            // Weights
+                            6 => Float32x4,
+                            // Normal mat
+                            7 => Float32x4,
+                            8 => Float32x4,
+                            9 => Float32x4,
+                            // Model mat
+                            10 => Float32x4,
+                            11 => Float32x4,
+                            12 => Float32x4,
+                            13 => Float32x4,
+                        ],
+                    },
                 ],
             },
             primitive: wgpu::PrimitiveState {
@@ -247,6 +368,7 @@ impl Renderer {
         view: &wgpu::TextureView,
         uniforms: &UniformHandler,
         model: &Model,
+        instances: &InstanceHandler,
     ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Render"),
@@ -272,7 +394,8 @@ impl Renderer {
         pass.set_index_buffer(model.index_buffer.slice(..), model.index_format);
         pass.set_vertex_buffer(0, model.vertex_buffer.slice(..));
         pass.set_vertex_buffer(1, model.morph_buffer.slice(..));
-        pass.draw_indexed(0..model.num_indices, 0, 0..1);
+        pass.set_vertex_buffer(2, instances.buffer.slice(..));
+        pass.draw_indexed(0..model.num_indices, 0, 0..(instances.data.len() as _));
     }
 }
 
@@ -429,7 +552,10 @@ async fn run() -> anyhow::Result<()> {
             &wgpu::DeviceDescriptor {
                 label: None,
                 features: wgpu::Features::default(),
-                limits: wgpu::Limits::downlevel_webgl2_defaults(),
+                limits: wgpu::Limits {
+                    max_texture_dimension_2d: 4096,
+                    ..wgpu::Limits::downlevel_defaults()
+                },
             },
             None,
         )
@@ -451,13 +577,15 @@ async fn run() -> anyhow::Result<()> {
         PI * 0.1,
         PI * 0.25,
         1.0,
-        glam::vec3(0.0, 3.0, -5.0),
+        glam::vec3(0.0, 3.0, -10.0),
         glam::vec3(0.0, 0.0, 0.0),
     );
     let mut renderer = Renderer::new(&device, &surf_config, &uniforms);
 
     let (document, buffers, images) = gltf::import_slice(include_bytes!("shape-keys.glb"))?;
     let model = Model::from_gltf(&device, &queue, &document, &buffers, &images)?;
+
+    let instances = InstanceHandler::new(&device, 100, 0.1, 0.5, 5.0);
 
     window.set_visible(true);
     let mut last_time = instant::Instant::now();
@@ -503,7 +631,7 @@ async fn run() -> anyhow::Result<()> {
                             });
 
                         uniforms.update(&queue, dt);
-                        renderer.render(&mut encoder, &view, &uniforms, &model);
+                        renderer.render(&mut encoder, &view, &uniforms, &model, &instances);
 
                         queue.submit([encoder.finish()]);
                         tex.present();

@@ -12,5 +12,6 @@ glam = {version = "0.22", features = ["bytemuck"]}
 gltf = "1"
 instant = "0.1"
 pollster = "0.2"
+rand = "0.8.5"
 wgpu = "0.14"
 winit = "0.27"
