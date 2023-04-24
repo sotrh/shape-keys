@@ -3,7 +3,7 @@ use std::{f32::consts::PI, num::NonZeroU64};
 use anyhow::{bail, Context};
 use bytemuck::{bytes_of, cast_slice};
 use rand::Rng;
-use wgpu::util::{BufferInitDescriptor, DeviceExt};
+use wgpu::{util::{BufferInitDescriptor, DeviceExt}, include_wgsl};
 use winit::{
     event::{ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent},
     event_loop::EventLoop,
@@ -47,6 +47,8 @@ struct InstanceRaw {
 pub struct InstanceHandler {
     data: Vec<Instance>,
     buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    pipeline: wgpu::ComputePipeline,
 }
 
 impl InstanceHandler {
@@ -56,6 +58,7 @@ impl InstanceHandler {
         min_size: f32,
         max_size: f32,
         placement_radius: f32,
+        uniforms: &UniformHandler,
     ) -> Self {
         let random_direction = || {
             let theta: f32 = rand::random::<f32>() * std::f32::consts::TAU;
@@ -68,12 +71,17 @@ impl InstanceHandler {
         };
         let data = (0..num)
             .map(|_| {
-                let dir = random_direction().normalize();
-                let position = dir * placement_radius * rand::random::<f32>();
+                let mut rng = rand::thread_rng();
+                let position = glam::vec3(
+                    rng.gen_range(-1.0..=1.0) * placement_radius,
+                    rng.gen_range(-1.0..=1.0) * placement_radius,
+                    rng.gen_range(-1.0..=1.0) * placement_radius,
+                );
 
                 let mut rng = rand::thread_rng();
                 let scale = rng.gen_range(min_size..=max_size);
 
+                let dir = random_direction();
                 let rotation =
                     glam::Quat::from_axis_angle(dir, rand::random::<f32>() * std::f32::consts::TAU);
 
@@ -125,19 +133,67 @@ impl InstanceHandler {
                 | wgpu::BufferUsages::STORAGE,
         });
 
-        Self { data, buffer }
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("InstanceHandler::layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                }
+            ]
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("InstanceHandler::bind_group"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buffer.as_entire_binding()
+                }
+            ]
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[&uniforms.layout, &layout],
+            push_constant_ranges: &[]
+        });
+
+        let module = device.create_shader_module(include_wgsl!("shader.wgsl"));
+
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("InstanceHandler::pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &module,
+            entry_point: "update_instances"
+        });
+
+        Self { data, buffer, bind_group, pipeline }
+    }
+
+    pub fn update(&self, encoder: &mut wgpu::CommandEncoder, uniforms: &UniformHandler) {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("Updating instances"),
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &uniforms.bind_group, &[]);
+        pass.set_bind_group(1, &self.bind_group, &[]);
+        pass.dispatch_workgroups(self.data.len() as _, 1, 1);
     }
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
-    weights: glam::Vec4,
+    time: glam::Vec4,
     view: glam::Mat4,
     view_proj: glam::Mat4,
 }
 
-struct UniformHandler {
+pub struct UniformHandler {
     aspect_ratio: f32,
     fovy: f32,
     angle: f32,
@@ -166,7 +222,7 @@ impl UniformHandler {
         let view_proj = proj * view;
 
         let data = Uniforms {
-            weights: glam::vec4(0.0, 0.0, 0.0, 0.0),
+            time: glam::Vec4::ZERO,
             view,
             view_proj,
         };
@@ -185,7 +241,7 @@ impl UniformHandler {
                     has_dynamic_offset: false,
                     min_binding_size: NonZeroU64::new(std::mem::size_of::<Uniforms>() as _),
                 },
-                visibility: wgpu::ShaderStages::VERTEX,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::COMPUTE,
             }],
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -218,15 +274,11 @@ impl UniformHandler {
         self.proj = glam::Mat4::perspective_lh(self.fovy, self.aspect_ratio, 0.1, 100.0);
     }
 
-    fn set_weights(&mut self, w0: f32, w1: f32) {
-        self.data.weights.x = w0;
-        self.data.weights.y = w1;
-    }
-
     fn update(&mut self, queue: &wgpu::Queue, dt: instant::Duration) {
-        self.angle += self.rotation_speed * dt.as_secs_f32();
-        let c = (self.angle * 2.0).cos() * 0.5 + 0.5;
-        self.set_weights(c, 1.0 - c);
+        let dt = dt.as_secs_f32();
+        self.angle += self.rotation_speed * dt;
+        self.data.time.x += dt;
+        self.data.time.y += dt;
         self.data.view = self.view * glam::Mat4::from_rotation_y(self.angle);
         self.data.view_proj = self.proj * self.data.view;
         queue.write_buffer(&self.buffer, 0, bytes_of(&self.data));
@@ -399,6 +451,7 @@ impl Renderer {
     }
 }
 
+#[derive(Debug)]
 struct Model {
     vertex_buffer: wgpu::Buffer,
     morph_buffer: wgpu::Buffer,
@@ -585,7 +638,7 @@ async fn run() -> anyhow::Result<()> {
     let (document, buffers, images) = gltf::import_slice(include_bytes!("shape-keys.glb"))?;
     let model = Model::from_gltf(&device, &queue, &document, &buffers, &images)?;
 
-    let instances = InstanceHandler::new(&device, 100, 0.1, 0.5, 5.0);
+    let instances = InstanceHandler::new(&device, 100, 0.1, 0.5, 5.0, &uniforms);
 
     window.set_visible(true);
     let mut last_time = instant::Instant::now();
@@ -631,6 +684,7 @@ async fn run() -> anyhow::Result<()> {
                             });
 
                         uniforms.update(&queue, dt);
+                        instances.update(&mut encoder, &uniforms);
                         renderer.render(&mut encoder, &view, &uniforms, &model, &instances);
 
                         queue.submit([encoder.finish()]);

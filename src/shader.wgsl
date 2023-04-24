@@ -36,7 +36,7 @@ struct Instance {
 }
 
 struct Uniforms {
-    weights: vec4<f32>,
+    time: vec4<f32>,
     view: mat4x4<f32>,
     view_proj: mat4x4<f32>,
 }
@@ -59,12 +59,12 @@ fn vs_main(v: Vertex, morphs: Morphs, instance: Instance) -> VsData {
     var normal = v.normal;
     var position = v.position;
 
-    normal += morphs.d_normal0 * uniforms.weights.x;
-    normal += morphs.d_normal1 * uniforms.weights.y;
+    normal += morphs.d_normal0 * instance.weights.x;
+    normal += morphs.d_normal1 * instance.weights.y;
     normal = normalize(normal);
 
-    position += morphs.d_position0 * uniforms.weights.x;
-    position += morphs.d_position1 * uniforms.weights.y;
+    position += morphs.d_position0 * instance.weights.x;
+    position += morphs.d_position1 * instance.weights.y;
 
     let normal_mat = mat3x3<f32>(
         instance.normal_mat0,
@@ -84,6 +84,7 @@ fn vs_main(v: Vertex, morphs: Morphs, instance: Instance) -> VsData {
     let eye_norm = (uniforms.view * vec4(normal_mat * normal, 0.0)).xyz;
 
     return VsData(frag_pos, eye_norm, instance.normal_mat0 * 0.5 + 0.5);
+    // return VsData(frag_pos, eye_norm, instance.weights.xyz);
 }
 
 @fragment
@@ -97,4 +98,26 @@ fn fs_main(vd: VsData) -> @location(0) vec4<f32> {
     let col = vd.color * diffuse + ambient;
 
     return vec4(col, 1.0);
+}
+
+@group(1)
+@binding(0)
+var<storage, read_write> instances: array<Instance>;
+
+@compute
+@workgroup_size(64)
+fn update_instances(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
+    let total = arrayLength(&instances);
+    let index = global_invocation_id.x;
+    if (index >= total) {
+        return;
+    }
+
+    var instance = instances[index];
+
+    let angles = asin(instance.weights.xy) + uniforms.time.y;
+    instance.weights.x = sin(angles.x) * 0.5 + 0.5;
+    instance.weights.y = sin(angles.y) * 0.5 + 0.5;
+
+    instances[index] = instance;
 }
